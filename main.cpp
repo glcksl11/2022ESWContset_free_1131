@@ -441,7 +441,7 @@ int en_pos = 0;
 
 double angle_errorX, error_pid_x, error_pid_x1, angle_errorY, error_pid_y, error_pid_y1;
 double Pangle_termX, Iangle_termX, PtermX, ItermX, DtermX, Pangle_termY, Iangle_termY, PtermY, ItermY, DtermY;
-double roll_output, pitch_output, yaw_output;
+double roll_output, pitch_output;
 
 int throttle1, throttle2, throttle3, throttle4;
 
@@ -560,13 +560,6 @@ int main()
         DtermY = -((gy - error_pid_y1) / (0.003)) * 0.0045; //0.0045
         ItermY += error_pid_y * (0.003) * 0.1;
 
-        /////////////////////////////////////////////////////////////////////
-        
-        error_pid_z = target_yaw - gz;
-
-        PtermZ = error_pid_z * P_gain_z;
-        DtermZ = -((angle_rateZ - error_pid_z1) / (0.004)) * D_gain_z;
-        ItermZ += error_pid_z * (0.004) * I_gain_z;
 
         if(Iangle_termX > 100)
             Iangle_termX = 100;
@@ -598,6 +591,14 @@ int main()
         
         ///////////////////////////////////////////////////////
         
+
+        // throttle1 = target_altitude + (int)roll_output;
+        // throttle2 = target_altitude - (int)roll_output;
+        // throttle3 = target_altitude - (int)roll_output;
+        // throttle4 = target_altitude + (int)roll_output;  
+
+        ////////////////////준석 속도 PID//////////////
+        /*
         if(Fmode == 2)
         {
             r_out=Roll_pid(roll, gx,kalval_hsX[1]);            
@@ -609,11 +610,28 @@ int main()
             PID_R_angle.reset();
             PID_R_rate.reset();
         }
-        
-        throttle1 = target_altitude + (int)(+roll_output - pitch_output + yaw_output);
-        throttle2 = target_altitude + (int)(-roll_output - pitch_output - yaw_output);
-        throttle3 = target_altitude + (int)(-roll_output + pitch_output + yaw_output);
-        throttle4 = target_altitude + (int)(+roll_output + pitch_output - yaw_output);        
+        */
+        ////////////////////준석 속도 PID//////////////
+        throttle1 = target_altitude + (int)roll_output;
+        throttle2 = target_altitude - (int)roll_output;
+        throttle3 = target_altitude - (int)roll_output;
+        throttle4 = target_altitude + (int)roll_output;  
+
+        // throttle1 = target_altitude + (int)r_out;
+        // throttle2 = target_altitude - (int)r_out;
+        // throttle3 = target_altitude - (int)r_out;
+        // throttle4 = target_altitude + (int)r_out;  
+
+        //throttle1 = (40) + target_altitude - (int)pitch_output;
+        //throttle2 = (40) + target_altitude - (int)pitch_output;
+        //throttle3 = target_altitude + (int)pitch_output;
+        //throttle4 = target_altitude + (int)pitch_output;
+  
+
+        //throttle1 = target_altitude + (int)(+roll_output - pitch_output);
+        //throttle2 = target_altitude + (int)(-roll_output - pitch_output);
+        //throttle3 = target_altitude + (int)(-roll_output + pitch_output);
+        //throttle4 = target_altitude + (int)(+roll_output + pitch_output);        
 
 
         if(throttle1 > 2000)    throttle1 = 2000;   //200넘으면 200으로
@@ -631,6 +649,15 @@ int main()
         motor4.pulsewidth_us(throttle4); //pitch 추가     지금은 throttle
         
 
+
+        //pc.printf("%f || %f\n\r", target_altitude, angleFix_y);
+        //pc.printf(" %f\n\r", mpu_time);
+
+        //pc.printf("%.3f, %.3f\n\r", r_out, roll_output);
+        //pc.printf(" %.3f %.3f \n\r", roll, mpu_time);
+        //pc.printf("Start = %d FMode = %d Gear = %d  Yaw = %f Al = %f Roll = %f Pitch = %f \n\r",PPM_ch[0],Fmode,Gear,target_yaw,target_altitude,target_roll,target_pitch);
+
+        //while(rtos::Kernel::get_ms_count() - Work < 4);
         Work=rtos::Kernel::get_ms_count();
         ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(3-(Work-Now)));
         main_time = (float)((rtos::Kernel::get_ms_count() - Now)/1000.0f);
