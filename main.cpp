@@ -11,8 +11,6 @@
 #include "PMW3901.h"
 #include "PID.h"
 #include "FastPWM.h"
-#define LIDARLite1_SDA I2C_SDA   //SDA pin on LPC1768
-#define LIDARLite1_SCL I2C_SCL  //SCL pin on LPC1768
 
 #define PI 3.141592
 
@@ -26,11 +24,10 @@ uint64_t Now, lastUpdate;
 
 //Thread optical_thread(osPriorityNormal);
 
-Thread MPU_thread(osPriorityHigh); //osPriorityHigh
+Thread MPU_thread(osPriorityRealtime); //osPriorityHigh
+Thread LIDAR_thread(osPriorityHigh);
 //Thread Read_thread(osPriorityRealtime6);
-Thread print_thread(osPriorityNormal);
-
-//Thread LIDAR_thread(osPriorityAboveNormal);
+Thread print_thread(osPriorityAboveNormal);
 //Thread optical_thread(osPriorityHigh);
 
 //Thread MPU_thread;
@@ -41,10 +38,11 @@ Thread print_thread(osPriorityNormal);
 // InterruptIn EPB(PB_1,PullUp);
 
 PMW3901 flow(D11,D12,D13,PC_3);
-LidarLite sensor1(PB_9, PB_8); //Define LIDAR Lite sensor 1
+LidarLite sensor1(PC_9, PA_8); // //PC_9, PA_8 /Define LIDAR Lite sensor 1
 
 MPU9250 mpu9250;
 kalman kal1, kal2;
+
 kalmanhs kal_hsX,kal_hsY;
 
 //////////////////////////// PID (kp,ki,kd,imax) 순임 
@@ -56,10 +54,12 @@ PID PID_P_rate(2.1,0.1,0.0045,150);
 //////////////////////////////
 //kalmanacc kalacc;
 
-Serial pc(USBTX,USBRX,115200);
+//Serial pc(USBTX,USBRX,115200);
+Serial pc(PC_12,PD_2,115200);
 
 Timer dt;
 Timer dt_2;
+
 Timer PPM_timer;
 Timer remote_timer_F;
 Timer remote_timer_G;
@@ -67,20 +67,28 @@ Timer remote_timer_Al;
 Timer remote_timer_Y;
 Timer remote_timer_R;
 Timer remote_timer_P;
+Timer remote_timer_E;
 
 FastPWM motor1(PC_7);
 FastPWM motor2(PB_10);
-FastPWM motor3(PA_8);
+FastPWM motor3(PB_15);
 FastPWM motor4(PA_9);
+
+//FastPWM motor2_1(PB_2);
+//FastPWM motor2_2(PA_11);
+
 
 InterruptIn PPM(PC_8);
 
 int PPM_i=0, PPM_init=0;
-int PPM_ch[7];
+int PPM_ch[8];
 
 uint32_t PPM_all[19], PWM_all[19];
-uint32_t PPM_signal[7]={0};
+uint32_t PPM_signal[8]={0};
 
+
+float lpf_dist, past_lpf_dist;
+float prev_lpf_dist;
 
 float raw_dist=0;
 float real_dist=0;
@@ -103,93 +111,153 @@ float kalval_hsY[3]={0,0,0};
 float vel_x_hs;
 float vel_x_hs2;
 float vel_x_js;
+float vel_x_js2;
+float vel_x_temp;
 float vel_y_js;
+float vel_y_js2;
 float _tmp=0.f;
 
 double temp = 0;
 
+
+float mpu_time;
+float main_time;
+//float lidar_time;
+int lidar_time;
+float opt_t, lidar_t;
+
+float hold_altitude;
+char hold_flag;
+char Elev_flag;
+char Down_flag;
+
+
+double velocity_errorX, velocity_errorY, Pvelocity_termX, Ivelocity_termX, Dvelocity_termX, prev_velocityX, Pvelocity_termY, Ivelocity_termY, Dvelocity_termY, prev_velocityY;
+double angle_errorX, error_pid_x, error_pid_x1, angle_errorY, error_pid_y, error_pid_y1,angle_errorZ, error_pid_z, error_pid_z1, altitude_err;
+double Pangle_termX, Iangle_termX, PtermX, ItermX, DtermX, prev_DtermX, Pangle_termY, Iangle_termY, PtermY, ItermY, DtermY, prev_DtermY, Pangle_termZ, Iangle_termZ, Dangle_termZ, prev_angle_DtermZ, prev_yaw, PtermZ, ItermZ, DtermZ, prev_DtermZ;
+double altitude_Pterm, altitude_Iterm, altitude_Dterm, prev_kal_dist, prev_altitude_Dterm;
+double roll_output, pitch_output, yaw_output, altitude_output, velocity_outputX, velocity_outputY;
+double Prev_Dvelocity_termX, Prev_Dvelocity_termY, prev_gz, lpf_gz;
+
+int throttle1 = 0, throttle2 = 0, throttle3 = 0, throttle4 = 0;
+int throttle_2_1 = 0, throttle_2_2 = 0;
+
+int Fmode, Gear, Elev;
+int yaw_flag=0, prev_yaw_flag=0, yaw_init_flag=0;
+int opt_gx = 0, opt_gy = 0;
+
+
 void init_sensor();
 
-/*
+
 Timer Lidar_t;
 void Lidar_thread_loop(){
-    float Lidar_sample=3;  //ms
+    float Lidar_sample=15;  //ms
+    uint64_t Now_L, Now_L2, Work_L;
     // float dt_L =0;
     // uint32_t Now_L;
     // uint32_t lastUpdate_L;
     
+    Lidar_t.start();
     while(1){
         // Now_L=Lidar_t.read_us();
         // dt_L=(float)((Now_L - lastUpdate_L)/1000000.0f) ;
         // lastUpdate_L = Now_L;
         // mutex.lock();
-        uint64_t Now_L = Kernel::get_ms_count();
-     
-        uint64_t Work_L= Kernel::get_ms_count();
-        ThisThread::sleep_until(Kernel::get_ms_count()+(Lidar_sample-(Work_L-Now_L)));
+
+        //Now_L = Lidar_t.read_us();
+        Now_L = rtos::Kernel::get_ms_count();
+        sensor1.refreshRange();
+        raw_dist=sensor1.getRange_cm();
+        real_dist=abs(raw_dist*cos(roll_rad)*cos(pitch_rad));
+
+        lpf_dist = past_lpf_dist*0.92 + real_dist*0.08;
+        past_lpf_dist = lpf_dist;
+
+        //kal_dist = kal1.getdist(real_dist, 0.015);
+        //kal_vel = kal1.getVel();     
+        
+        Work_L= rtos::Kernel::get_ms_count();
+        
+        ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(Lidar_sample-(Work_L-Now_L)));
+
+        //ThisThread::sleep_for((Lidar_sample-(Work_L-Now_L)));
+        lidar_time=rtos::Kernel::get_ms_count()-Now_L;
+        //Work_L = Lidar_t.read_us();
+
+        //lidar_time = Work_L - Now_L;
 
         // uint64_t working_Tick = Kernel::get_ms_count();
-        // ThisThread::sleep_until(Kernel::get_ms_count()+((uint64_t)(Lidar_sample*1000)-(working_Tick-current_Tick)));
-         uint64_t last_Tick = Kernel::get_ms_count();
+        //ThisThread::sleep_until(Kernel::get_ms_count()+((uint64_t)(Lidar_sample*1000)-(working_Tick-current_Tick)));
         //Lidar_t.reset();
         // mutex.unlock();
         // pc.printf("%llu \n",last_Tick-Now_L);
         Lidar_t.reset();
     }
-}*/
-
-float read_time;
-Timer read_t;
-void read_thread_loop(){
-    float read_sample = 3;
-    uint64_t Now_R, Work_R;
-    read_t.start();
-    while(1){
-        Now_R = rtos::Kernel::get_ms_count();
-
-        mpu9250.read_data();
-        roll_rad=roll*PI/180;
-        pitch_rad=pitch*PI/180;
-        raw_acc_x= ax+sin(pitch_rad)*cos(pitch_rad);
-        raw_acc_y= ay-sin(roll_rad)*cos(roll_rad);
-        raw_acc_z= -(az/(cos(roll_rad)*cos(pitch_rad))-1)*9.81;
-
-        Work_R = rtos::Kernel::get_ms_count();
-
-        ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(read_sample-(Work_R-Now_R)));
-        read_time = rtos::Kernel::get_ms_count()-Now_R;
-    }
 }
-
-
-
-float mpu_time;
-float main_time;
 
 Timer MPU_t;
 void MPU_thread_loop(){
     
     float IMU_sample=3; //4ms
-     uint64_t Now_M,Work_M,done_t;
+    uint64_t Now_M,Work_M, done_t;
+    uint64_t now_lidar = 0, work_lidar = 0;
+    char lidar_cnt = 0, lidar_flag = 0;
+    float axx = 0, ayy = 0, azz = 0;
+    //uint64_t imsi_t1,imsi_t2;
     // uint32_t lastUpdate_M;
-    MPU_t.start();
+    //MPU_t.start();
     while(1){
-         Now_M=rtos::Kernel::get_ms_count();
+        //imsi_t1=MPU_t.read_us();
+        Now_M=rtos::Kernel::get_ms_count();
                                // 기존 코드
-       // mutex.lock();
-         //Now_M=rtos::Kernel::get_ms_count();
+        // mutex.lock();
+        //Now_M=rtos::Kernel::get_ms_count();
         // dt_M=(float)((Now_M - lastUpdate_M)/1000000.0f) ;
         // lastUpdate_M = Now_M;
         //uint64_t current_Tick = Kernel::get_ms_count();
+        
+        //lidar_cnt++;
 
         mpu9250.get_data();
-      
+        roll_rad=roll*PI/180;
+        pitch_rad=pitch*PI/180;
+        axx = ax+sin(pitch_rad);
+        ayy = ay-sin(roll_rad);
+        azz = az-cos(pitch_rad)*cos(roll_rad);
+        raw_acc_x= axx*cos(pitch_rad)+(azz)*sin(pitch_rad);
+        raw_acc_y= axx*sin(roll_rad)*sin(pitch_rad)+ayy*cos(roll_rad)-(azz)*sin(roll_rad)*cos(pitch_rad);
+        raw_acc_z= -axx*cos(roll_rad)*sin(pitch_rad) + ayy*sin(roll_rad)+(azz)*cos(roll_rad)*cos(pitch_rad);
 
-        // sensor1.refreshRangeVelocity();
-        // raw_dist=sensor1.getRange_cm();
-        // real_dist=abs(raw_dist*cos(roll_rad)*cos(pitch_rad));
-        // kal_dist = kal1.getdist(real_dist, deltat);
-        // kal_vel = kal1.getVel();
+
+        //raw_acc_x= ax+sin(pitch_rad)*cos(pitch_rad);
+        //raw_acc_y= ay-sin(roll_rad)*cos(roll_rad);
+        //raw_acc_z= -(az/(cos(roll_rad)*cos(pitch_rad))-1)*9.81;
+
+        /*
+        if(!lidar_flag)
+        {
+            lidar_flag = 1;
+            now_lidar = MPU_t.read_ms();
+        }
+
+        if(lidar_cnt == 5)
+        {
+            sensor1.refreshRangeVelocity();
+            raw_dist=sensor1.getRange_cm();
+            real_dist=abs(raw_dist*cos(roll_rad)*cos(pitch_rad));
+            kal_dist = kal1.getdist(real_dist, deltat);
+            kal_vel = kal1.getVel();
+
+            work_lidar = MPU_t.read_ms();
+            lidar_t = work_lidar - now_lidar;
+            
+            MPU_t.reset();
+            lidar_flag = 0;
+            lidar_cnt = 0;
+        }*/
+
+
                                         
         // mpu9250.MahonyQuaternionUpdate(ax, ay, az, gx*PI/180.0f, gy*PI/180.0f, gz*PI/180.0f, my, mx, mz);
         // yaw   = atan2(2.0f * (q[1] * q[2] + q[0] * q[3]), q[0] * q[0] + q[1] * q[1] - q[2] * q[2] - q[3] * q[3]);
@@ -203,6 +271,7 @@ void MPU_thread_loop(){
 
         Work_M=rtos::Kernel::get_ms_count();
         ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(IMU_sample-(Work_M-Now_M)));
+        //ThisThread::sleep_for((IMU_sample-(Work_M-Now_M)));
         mpu_time=rtos::Kernel::get_ms_count()-Now_M;
         
         
@@ -215,18 +284,21 @@ void MPU_thread_loop(){
         // mutex.unlock();
         // pc.printf("  IMU\n\r");
         //pc.printf("Total time M: %llu\n", working_Tick - current_Tick);
-        MPU_t.reset();
+        // imsi_t2=MPU_t.read_us();
+        // temp_imsi=imsi_t2-imsi_t1;
+        // MPU_t.reset();
         
     }
 }
 
-Timer optical_t;
+//Timer optical_t;
+/*
 float opt_time;
-uint64_t Now_V,Work_V,END_V,Last_V;
+uint64_t Now_V, Work_V, END_V, Last_V;
 void optical_thread_loop(){
     float optical_sample=100; //ms
     
-    optical_t.start();
+    //optical_t.start();
     while(1){
         
         //mutex.lock();
@@ -251,36 +323,46 @@ void optical_thread_loop(){
         //kalhs_2.kalmanTask_hs(vel_x_js2, raw_acc_y*9.81,kalval_hs2);
         //mutex.unlock();
         //pc.printf("Optical\n\r");
-        optical_t.reset();
+        //optical_t.reset();
     }
 
 }
-volatile float target_yaw, target_altitude, target_roll, target_pitch;
-volatile float target_Vx, target_Vy=0;
+*/
+volatile float target_yaw,target_yaw_rate, target_throttle, target_roll, target_pitch;
+volatile float target_Vx = 0, target_Vy = 0;
+char target_yaw_test_flag=0;
 
 
 float print_time;
-Timer print_t;
+
+double angle_errorZ_temp;
+
+//Timer print_t;
 void print_thread_loop(){
-    float print_sample = 10;
+    float print_sample = 45;
     uint64_t Now_P, Work_P;
-    print_t.start();
+    //print_t.start();
     while(1){
         Now_P = rtos::Kernel::get_ms_count();
-        pc.printf("%.3f %.3f\n\r", target_roll,roll);
+        pc.printf("%.1f %.1f\n\r", target_Vy*100, kalval_hsY[1]*100);
+        //pc.printf("%.1f %.1f\n\r", target_roll, roll);
+        //pc.printf("%.1f %.1f\n\r", target_Vy*100, kalval_hsY[1]*100);
+        //pc.printf("%.1f %.1f\n\r", vel_y_js*100, vel_y_js2*100);
+        //pc.printf("%.1f  %.1f\n\r",kalval_hsX[1]*100, kalval_hsY[1]*100);
+        //pc.printf("%.1f %.1f %.1f\n\r", target_pitch, target_Vy, target_Vx);
+        //pc.printf("%.1f  %.1f  %.1f\n\r", yaw, target_yaw, angle_errorZ_temp);
+        //pc.printf("Start = %d FMode = %d Gear = %d  Yaw = %f Al = %f Roll = %f Pitch = %f Elev = %d \n\r",PPM_ch[0],Fmode,Gear,target_yaw,target_throttle,target_Vx,target_Vy,Elev);
+        //pc.printf("%.1f %.1f\n\r",target_Vy*100,kalval_hsY[1]*100);
+
         Work_P = rtos::Kernel::get_ms_count();
-        //ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(print_sample-(Work_P-Now_P)));
-        print_time= rtos::Kernel::get_ms_count()-Now_P;
-        print_t.reset();
+        ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(print_sample-(Work_P-Now_P)));
+        print_time = rtos::Kernel::get_ms_count()-Now_P;
+        //print_t.reset();
     }
 }
 
 
-int Fmode, Gear;
 ////////////////
-
-
-
 
 double map(double Tx, double Tin_min, double Tin_max, double Tout_min,  double Tout_max)
 {
@@ -289,12 +371,12 @@ double map(double Tx, double Tin_min, double Tin_max, double Tout_min,  double T
 
 
 void Check_CH(){
-    for(int k=0;k<7;k++){
+    for(int k=0;k<8;k++){
             if(PPM_ch[k]<700)PPM_ch[k]=700;
             if(PPM_ch[k]>1500)PPM_ch[k]=1500;
         }
     
-    for(int i =0;i<7;i++){
+    for(int i =0;i<8;i++){
             PPM_signal[i]=PPM_ch[i];
         }
     //////////CH2 FMODE START /////////////
@@ -321,27 +403,51 @@ void Check_CH(){
 
     if(PPM_ch[2]>=700 && PPM_ch[2]<=750 && remote_timer_G.read_ms()>100){
          remote_timer_G.reset();
-         Gear = 1;          /// 벽 프로펠러 온?
+         Gear = 1;          /// Angle Mode
         // drone.target_xpos += 0.05;
     }
     else if(PPM_ch[2]>1450 && PPM_ch[2]<=1500 && remote_timer_G.read_ms()>100){
          remote_timer_G.reset();
-         Gear = 2;         /// 벽 프로펠러 오프?
+         Gear = 2;         /// Velocity Mode
         // drone.target_xpos -= 0.05;
     }
     ////////////CH3 GEAR END//////////
 
     ////////////CH4 YAW START//////////
-    if(PPM_ch[3]>=700 && PPM_ch[3]<=1080 && remote_timer_Y.read_ms()>100){
-         remote_timer_Y.reset();
-         target_yaw -=0.1;
+    // if(PPM_ch[3]>=700 && PPM_ch[3]<=1080 && remote_timer_Y.read_ms()>100){
+    //      remote_timer_Y.reset();
+    //      target_yaw -=0.1;
             
-    }
-    else if(PPM_ch[3]>1120 && PPM_ch[3]<=1500 && remote_timer_Y.read_ms()>100){
-         remote_timer_Y.reset();
-         target_yaw +=0.1;
+    // }
+    // else if(PPM_ch[3]>1120 && PPM_ch[3]<=1500 && remote_timer_Y.read_ms()>100){
+    //      remote_timer_Y.reset();
+    //      target_yaw +=0.1;
                   
+    // }
+
+    if(PPM_ch[3]>=700 && PPM_ch[3]<=1500 && remote_timer_Al.read_ms()>100){
+         remote_timer_Y.reset();
+         //temp=PPM_ch[3];
+        //  if(PPM_ch[3]>1050&&PPM_ch[3]<1150) {yaw_flag=0;}
+        //if(PPM_ch[3]<=1050||PPM_ch[3]>=1150) {
+        // target_yaw -= map(PPM_ch[3],700,1500,-1,1);   //
+        //}
+
+        if(PPM_ch[3]<=1050||PPM_ch[3]>=1150)
+        {
+            target_yaw_rate = map(PPM_ch[3],700,1500,15,-15);
+        }
+        else {
+            target_yaw_rate = 3.1;//3.7
+        }
+
+        // if(target_yaw > 180)
+        //     target_yaw = target_yaw - 360;
+
+        // else if(target_yaw < -180)
+        //     target_yaw = target_yaw + 360;
     }
+
     ////////////CH4 YAW END//////////
 
 
@@ -349,7 +455,8 @@ void Check_CH(){
     ////////////CH5 Altitude START//////////
     if(PPM_ch[4]>=700 && PPM_ch[4]<=1500 && remote_timer_Al.read_ms()>100){
          remote_timer_Al.reset();
-         target_altitude = map(PPM_ch[4],700,1500,1000,2000);   /// 일단은 쓰로틀 1000~2000으로 설정
+         //temp=PPM_ch[4];
+         target_throttle = map(PPM_ch[4],700,1500,1000,2000);   /// 일단은 쓰로틀 1000~2000으로 설정
     }
     ////////////CH5 Altitude END//////////
 
@@ -357,8 +464,26 @@ void Check_CH(){
     ////////////CH6 Roll START//////////
     if(PPM_ch[5]>=700 && PPM_ch[5]<=1500 && remote_timer_R.read_ms()>100){
          remote_timer_R.reset();
-         target_roll=map(PPM_ch[5],700,1500,-15,15);
-           
+        //  if(Gear == 1)
+        //     target_roll=map(PPM_ch[5],700,1500,-10,10); //-15, 15
+        //  else if(Gear == 2){
+        //     if(PPM_ch[5]<=1050||PPM_ch[5]>=1150)
+        //         target_Vx = map(PPM_ch[5],700,1500,-0.6,0.6);
+        //     else
+        //      target_Vx=0;
+        //  }          
+            if(PPM_ch[5]<=1050||PPM_ch[5]>=1150)
+            {
+                target_Vx = map(PPM_ch[5],700,1500,-1.0, 1.0);
+                //target_roll = map(PPM_ch[5],700,1500,-5.0, 5.0);                
+            }
+
+            else
+            {
+                target_Vx=0;
+                //target_roll = 0;
+            }
+
     }
     
         ////////////CH6 Roll END//////////
@@ -366,8 +491,37 @@ void Check_CH(){
     ////////////CH7 PITCH START//////////////
     if(PPM_ch[6]>=700 && PPM_ch[6]<=1500 && remote_timer_P.read_ms()>100){
          remote_timer_P.reset();
-         target_pitch=map(PPM_ch[6],700,1500,-10,10);
-                 
+        //  if(Gear == 1)
+        //     target_pitch=map(PPM_ch[6],700,1500,-5,5); //-10, 10
+
+        //  else if(Gear == 2){
+        //     if(PPM_ch[6]<=1050||PPM_ch[6]>=1150)
+        //         target_Vy = map(PPM_ch[6],700,1500,-0.6,0.6);     
+        //     else
+        //      target_Vy=0;
+        //  }
+            if(PPM_ch[6]<=1050||PPM_ch[6]>=1150)
+            {
+                target_Vy = map(PPM_ch[6],700,1500,-1.5,1.5);
+                //target_pitch = map(PPM_ch[6],700,1500,-4,4);; 
+            }
+
+            else
+            {
+                target_Vy=0;
+                //target_pitch = 0;
+            }                 
+    }
+
+
+    if(PPM_ch[7]>=700 && PPM_ch[7]<=750 && remote_timer_E.read_ms()>100){
+        remote_timer_E.reset();
+        Elev= 1;
+    }
+    else if(PPM_ch[7]>1450 && PPM_ch[7]<=1500 && remote_timer_E.read_ms()>100){
+         remote_timer_E.reset();
+         Elev = 2;         /// Velocity Mode
+        // drone.target_xpos -= 0.05;
     }
        ////////////CH7 PITCH START//////////////
 
@@ -385,7 +539,7 @@ void PPM_Fall(){
                 PPM_init = k;
             }
         }
-        for(int k=0;k<7;k++){
+        for(int k=0;k<8;k++){
             PPM_ch[k]=PPM_all[PPM_init+k+1];
         }
         PPM_i = 0;
@@ -407,7 +561,6 @@ double Roll_pid(double angle, double rate, double velocity){
     double target_Rate = PID_R_angle.P_control(error);
     double error_rate = target_Rate-rate;
     double result = PID_R_rate.get_PID(error_rate, rate,prev_gx, 0.005)+PID_R_angle.I_control(error, 0.004);  //PIPID
-    temp = PID_R_rate.I_control(error, 0.004);
     prev_gx=rate;
     prev_angle_x=angle;
     return result;
@@ -428,28 +581,14 @@ float Pitch_pid(float angle, float rate){
 //////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////
 
-int en_pos = 0;
-// void doEncoderA(void)
-// {
-//   en_pos += (EPA == EPB)?1:-1;
-// }
-
-// void doEncoderB(void)
-// {
-//   en_pos += (EPA == EPB)?-1:1;
-// }
-
-double angle_errorX, error_pid_x, error_pid_x1, angle_errorY, error_pid_y, error_pid_y1, error_pid_z, error_pid_z1;
-double Pangle_termX, Iangle_termX, PtermX, ItermX, DtermX, Pangle_termY, Iangle_termY, PtermY, ItermY, DtermY, PtermZ, DtermZ, ItermZ;;
-double roll_output, pitch_output, yaw_output;
-
-int throttle1, throttle2, throttle3, throttle4;
 
 double r_out;
 
 int main()
 {
     init_sensor();
+    //sensor1.Lidar_init();
+
     pc.baud(115200);
     dt.start();
     dt_2.start();
@@ -458,13 +597,18 @@ int main()
     motor2.pulsewidth_us(1000);
     motor3.pulsewidth_us(1000);
     motor4.pulsewidth_us(1000);
-    MPU_thread.start(&MPU_thread_loop);
-    //Read_thread.start(&read_thread_loop);
-    print_thread.start(&print_thread_loop);
-    //LIDAR_thread.start(&Lidar_thread_loop);
-    //optical_thread.start(&optical_thread_loop);
+    
+    //motor2_1.pulsewidth_us(1000);
+    //motor2_2.pulsewidth_us(1000);
+
+    wait_ms(2000);
 
     osThreadSetPriority(osThreadGetId(), osPriorityRealtime7);
+    
+    MPU_thread.start(&MPU_thread_loop);
+    LIDAR_thread.start(&Lidar_thread_loop);
+    print_thread.start(&print_thread_loop);
+    //optical_thread.start(&optical_thread_loop);
 
     //MPU_thread.join();
     //LIDAR_thread.join();
@@ -483,10 +627,11 @@ int main()
     remote_timer_Y.start();
     remote_timer_R.start();
     remote_timer_P.start();
-    
+    remote_timer_E.start();
+
     PPM.rise(&PPM_Rise);
     PPM.fall(&PPM_Fall);
-
+    
     
 
     uint64_t lastUpdate = 0, firstUpdate = 0, Now = 0, Work=0;
@@ -495,12 +640,14 @@ int main()
     //float distance;
     float err_roll;
     //float main_time;
-    float opt_t;
+    //float opt_t, lidar_t;
+
     char opt_cnt = 0, opt_flag = 0;
     // EPA.rise(&doEncoderA);
     // EPA.fall(&doEncoderA);
     // EPB.rise(&doEncoderB);
     // EPB.fall(&doEncoderB);
+    
 
     while(1)
     {
@@ -508,24 +655,76 @@ int main()
         //main_time = (float)((Now - lastUpdate)/1000.0f); // set integration time by time elapsed since last filter update
         //lastUpdate = Now;
 
-        
         opt_cnt++;
-
+        
         if(!opt_flag)
         {
              now_opt = dt_2.read_ms();
              opt_flag = 1;
         }
-
         
-        if(opt_cnt == 26)
+        if(opt_cnt == 4)
         {
+            opt_gx = gx;
+            opt_gy = gy;
             flow.read();
-            vel_x_js=(kal_dist/100)*(42.*PI/180)*((float)flow.px)/(main_time*300)-(kal_dist/100)*(gx*(PI/180));
-            vel_y_js=(kal_dist/100)*(42.*PI/180)*((float)flow.py)/(main_time*300)-(kal_dist/100)*(gy*(PI/180));
+            vel_x_js2=(lpf_dist/100)*(42.*PI/180)*((float)flow.px)/(0.01*300);
+            vel_y_js2=(lpf_dist/100)*(42.*PI/180)*((float)flow.py)/(0.01*300);
+
+            vel_x_js=(lpf_dist/100)*(42.*PI/180)*((float)flow.px)/(0.01*300)+(lpf_dist/100)*(gx*(PI/180))*1.4;
+            vel_y_js=(lpf_dist/100)*(42.*PI/180)*((float)flow.py)/(0.01*300)+(lpf_dist/100)*(gy*(PI/180))*1.4;            
+
+            //vel_x_js=(lpf_dist/100)*(42.*PI/180)*((float)flow.px)/(0.01*300)+((lpf_dist/100)*(gx*(PI/180)*1.15));
+            //vel_y_js=(lpf_dist/100)*(42.*PI/180)*((float)flow.py)/(0.01*300)+((lpf_dist/100)*(gy*(PI/180)*1.15));
+
             //vel_x_js2=(kal_dist/100)*(42.*PI/180)*((float)flow.px)/(deltat*300);
             kal_hsX.kalmanTask_hs(vel_x_js,raw_acc_x*9.81,kalval_hsX);
             kal_hsY.kalmanTask_hs(vel_y_js,raw_acc_y*9.81,kalval_hsY);
+
+            /////////////////////////////////////////////////////////////////////////////////////////////////
+
+            velocity_errorX = target_Vx - kalval_hsX[1];
+
+            Pvelocity_termX = 8.5 * velocity_errorX;//7.5//6.0
+            Ivelocity_termX += velocity_errorX * (0.01) * 0.0;
+
+            Dvelocity_termX = -((kalval_hsX[1] - prev_velocityX) / (0.01));
+            Dvelocity_termX = Prev_Dvelocity_termX*0.88 + Dvelocity_termX*0.12;
+            Prev_Dvelocity_termX = Dvelocity_termX;
+
+            Dvelocity_termX *= 1.4;//1.2
+
+
+            velocity_errorY = target_Vy - kalval_hsY[1];
+
+            Pvelocity_termY = 9.5 * velocity_errorY;   //6.5//4.5
+            Ivelocity_termY += velocity_errorY * (0.01) * 0.0;
+
+            Dvelocity_termY = -((kalval_hsY[1] - prev_velocityY) / (0.01));
+            Dvelocity_termY = Prev_Dvelocity_termY*0.88 + Dvelocity_termY*0.12;
+            Prev_Dvelocity_termY = Dvelocity_termY;    
+
+            Dvelocity_termY *= 1.85; //1.2//
+
+            prev_velocityX = kalval_hsX[1];
+            prev_velocityY = kalval_hsY[1];
+
+            velocity_outputX = Pvelocity_termX + Ivelocity_termX + Dvelocity_termX;
+            velocity_outputY = Pvelocity_termY + Ivelocity_termY + Dvelocity_termY;
+
+            if(velocity_outputX > 5.0)
+                velocity_outputX = 5.0;
+            else if(velocity_outputX < -5.0)
+                velocity_outputX = -5.0;
+            
+            if(velocity_outputY > 4.0) //3.5
+                velocity_outputY = 4.0;
+            else if(velocity_outputY < -2.0)
+                velocity_outputY = -2.0;
+
+
+            target_roll = velocity_outputX;
+            target_pitch = velocity_outputY;         
 
             work_opt = dt_2.read_ms();
             opt_t = work_opt - now_opt;
@@ -533,41 +732,86 @@ int main()
             opt_cnt = 0;
             opt_flag = 0;
         }
-            
-        //////////////////////////////////////////////////////////
-        //roll
+
+        ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Velocity X
+
+        
+
+        ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        //Roll
         angle_errorX =  target_roll - roll;
 
-        Pangle_termX = 3.6 * angle_errorX;    //2.3
-        Iangle_termX += angle_errorX * (0.003) * 1.3;  //0.12
+        Pangle_termX = 3.6 * angle_errorX;    //2.3       5
+        Iangle_termX += angle_errorX * (0.003) * 1.3;  //0.12  
 
         error_pid_x = Pangle_termX - gx;
             
-        PtermX = error_pid_x * 2.4;
-        DtermX = -((gx - error_pid_x1) / (0.003)) * 0.002;
-        ItermX += error_pid_x * (0.003) * 0.01;//0.5
+        PtermX = error_pid_x * 2.4;     // 2
+        //DtermX = -((gx - error_pid_x1) / (0.003)) * 0.002;
+
+        DtermX = -((gx - error_pid_x1) / (0.003));
+        DtermX = prev_DtermX*0.99 + DtermX*0.01;
+        prev_DtermX = DtermX;
+
+        DtermX *= 0.13; //0.13//0.02;  0.005
+
+        ItermX += error_pid_x * (0.003) * 0.01;//0.01
+
 
         ////////////////////////////////////////////////////////////////////
-        //pitch
+        //Pitch
         angle_errorY =  target_pitch - pitch;
 
-        Pangle_termY = 3.5 * angle_errorY;//3.5
-        Iangle_termY += angle_errorY * (0.003) * 0.1;
+        Pangle_termY = 5.5 * angle_errorY;//5.0
+        Iangle_termY += angle_errorY * (0.003) * 1.5; //4.0
 
         error_pid_y = Pangle_termY - gy;
             
-        PtermY = error_pid_y * 2.1;
-        DtermY = -((gy - error_pid_y1) / (0.003)) * 0.0045; //0.0045
-        ItermY += error_pid_y * (0.003) * 0.1;
-
-        ////////////////////////////////////////////////////////////////////
-        //yaw
-        error_pid_z = target_yaw - gz;
-
-        PtermZ = error_pid_z * 2.5;
-        DtermZ = -((gz - error_pid_z1) / (0.003)) * 0.1;
-        ItermZ += error_pid_z * (0.003) * 0.7;
+        PtermY = error_pid_y * 2.5;
         
+        DtermY = -((gy - error_pid_y1) / (0.003));// * 0.0045; //0.0045
+        DtermY = prev_DtermY*0.99 + DtermY*0.01;
+        prev_DtermY = DtermY;
+
+        DtermY *=1.0; //1.0//0.9 //0.6
+
+        ItermY += error_pid_y * (0.003) * 0.01;
+
+        //////////////////////////////////////////////////////////////////////
+        //Yaw
+
+        
+        //angle_errorZ = target_yaw - yaw;
+
+        //if(angle_errorZ > 180)
+            //angle_errorZ = angle_errorZ - 360;
+        //else if(angle_errorZ < -180)
+            //angle_errorZ = angle_errorZ + 360;
+
+        //angle_errorZ_temp = angle_errorZ;
+
+        //Iangle_termZ += angle_errorZ * (0.003) * 0.0; //0.05
+        
+        //error_pid_z = 3.7 * angle_errorZ; //3.4
+        //Iangle_termZ += angle_errorZ* (0.003) *5.0;//4.0
+        lpf_gz = prev_gz*0.96 + gz*0.04;
+        prev_gz = lpf_gz;
+
+        PtermZ = (target_yaw_rate - lpf_gz) * 22.5;//20/ /27
+        //PtermZ = (error_pid_z - lpf_gz) * 2.1; //2.4 //2.2    
+        DtermZ = -((lpf_gz - error_pid_z1) / (0.003));
+        DtermZ = prev_DtermZ*0.9 + DtermZ*0.1;
+        prev_DtermZ = DtermZ;
+
+        DtermZ *=0.23;
+
+        ItermZ += error_pid_z * (0.003) * 0.0;   //0.3      
+
+
         if(Iangle_termX > 100)
             Iangle_termX = 100;
         else if( Iangle_termX < -100)
@@ -591,18 +835,45 @@ int main()
 
         if(ItermZ > 100)
             ItermZ = 100;
-        else if( ItermZ < -100)
+        else if(ItermZ < -100)
             ItermZ = -100;
+
+        if(Iangle_termZ > 150)
+            Iangle_termZ = 150;
+        else if(Iangle_termZ < -150)
+            Iangle_termZ = -150;
+
 
         roll_output = PtermX + Iangle_termX + DtermX + ItermX;
         pitch_output = PtermY + Iangle_termY + DtermY + ItermY;
-        yaw_output = PtermZ + DtermZ + ItermZ;
+        //yaw_output = PtermZ + DtermZ + ItermZ + Iangle_termZ;
+        yaw_output = PtermZ  + DtermZ;
+
+        if(yaw_output > 150)
+        {
+            yaw_output = 150;
+        }
+
+        else if(yaw_output < -150)
+        {
+            yaw_output = -150;
+        }
+    
+        //Altitude_output = altitude_Pterm + altitude_Iterm + altitude_Dterm;
 
         error_pid_x1 = gx;
         error_pid_y1 = gy;
-        error_pid_z1 = gz;
+        error_pid_z1 = lpf_gz;//gz
         
         ///////////////////////////////////////////////////////
+        
+
+        // throttle1 = target_throttle + (int)roll_output;
+        // throttle2 = target_throttle - (int)roll_output;
+        // throttle3 = target_throttle - (int)roll_output;
+        // throttle4 = target_throttle + (int)roll_output;  
+
+        ////////////////////준석 속도 PID//////////////
         /*
         if(Fmode == 2)
         {
@@ -616,11 +887,151 @@ int main()
             PID_R_rate.reset();
         }
         */
+        ////////////////////준석 속도 PID//////////////
+        //throttle1 = target_throttle + (int)roll_output;
+        //throttle2 = target_throttle - (int)roll_output;
+        //throttle3 = target_throttle - (int)roll_output;
+        //throttle4 = target_throttle + (int)roll_output;
 
-        throttle1 = target_altitude + (int)(+roll_output - pitch_output + yaw_output;
-        throttle2 = target_altitude + (int)(-roll_output - pitch_output - yaw_output);
-        throttle3 = target_altitude + (int)(-roll_output + pitch_output + yaw_output);
-        throttle4 = target_altitude + (int)(+roll_output + pitch_output - yaw_output);        
+        // throttle1 = target_throttle + roll_output;
+        // throttle2 = target_throttle - roll_output;
+        // throttle3 = target_throttle - roll_output;
+        // throttle4 = target_throttle + roll_output; 
+
+        // throttle1 = target_throttle + (int)r_out;
+        // throttle2 = target_throttle - (int)r_out;
+        // throttle3 = target_throttle - (int)r_out;
+        // throttle4 = target_throttle + (int)r_out;  
+
+        if(Fmode == 1)
+        {
+            roll_output = 0;
+            pitch_output = 0;
+            yaw_output = 0;
+            Iangle_termX = 0;
+            Iangle_termY = 0;
+            Iangle_termZ = 0;
+
+            ItermX = 0;
+            ItermY = 0;
+            ItermZ = 0;
+            altitude_Iterm = 0;
+
+            yaw_init_flag=0;
+
+            // throttle1 = (int)(target_throttle);
+            // throttle2 = (int)(target_throttle);
+            // throttle3 = (int)(target_throttle);
+            // throttle4 = (int)(target_throttle);
+
+            throttle1 = (int)(1000);
+            throttle2 = (int)(1000);
+            throttle3 = (int)(1000);
+            throttle4 = (int)(1000);
+            //throttle_2_1 = (int)(target_throttle);
+            //throttle_2_2 = (int)(target_throttle);
+
+        }
+
+        else if(Fmode == 2) // altitude pid mode
+        {
+            if(!yaw_init_flag)
+            {
+                target_yaw = yaw;
+                yaw_init_flag=1;
+            }
+
+            throttle1 = (int)(30 + target_throttle + (int)roll_output - (int)pitch_output + (int)yaw_output);
+            throttle2 = (int)(30 + target_throttle - (int)roll_output - (int)pitch_output - (int)yaw_output);
+            throttle3 = (int)( target_throttle - (int)roll_output + (int)pitch_output + (int)yaw_output);
+            throttle4 = (int)( target_throttle + (int)roll_output + (int)pitch_output - (int)yaw_output);
+
+            hold_flag = 0;
+
+        }
+
+        else if(Fmode == 3)
+        {
+            if(hold_flag == 0)
+            {
+               //hold_altitude = kal_dist;
+               hold_altitude = lpf_dist;
+               hold_flag = 1;               
+            }
+            /////// 고도 +///////
+            if(Elev == 1)
+                Elev_flag=0;
+            if(Elev==2){
+                if(Elev_flag==0)
+                {
+                    hold_altitude+=20;
+                    Elev_flag=1;
+                    if(hold_altitude >= 200)
+                        hold_altitude = 200;
+                }   
+            }
+            //////////////////////
+            /////// 고도 -///////
+            if(Gear == 1)
+                Down_flag=0;
+            if(Gear==2){
+                if(Down_flag==0){
+                    hold_altitude-=20;
+                    Down_flag=1;
+                    //if(hold_altitude <= 50)
+                    //    hold_altitude = 50;
+                }   
+            }
+
+            altitude_err = (hold_altitude - lpf_dist) / 100.0;
+
+            altitude_Pterm = altitude_err * 40.0; //90.0
+            altitude_Iterm += altitude_err * 65.0 * 0.003; //80//40.0
+
+            altitude_Dterm = -(lpf_dist - prev_lpf_dist) / 0.003;
+            altitude_Dterm = prev_altitude_Dterm*0.87 + altitude_Dterm*0.13;//0.99,0.01
+            prev_altitude_Dterm = altitude_Dterm;
+
+            altitude_Dterm*= 2.0; //0.8  1.3
+
+            if(altitude_Iterm > 300)
+                altitude_Iterm = 300;
+            else if(altitude_Iterm < -300)
+                altitude_Iterm = -300;            
+
+            altitude_output = altitude_Pterm + altitude_Iterm + altitude_Dterm; //+
+            
+            throttle1 = (int)(30 + target_throttle + (int)altitude_output + (int)roll_output - (int)pitch_output + (int)yaw_output);
+            throttle2 = (int)(30 + target_throttle + (int)altitude_output - (int)roll_output - (int)pitch_output - (int)yaw_output);
+            throttle3 = (int)(target_throttle + (int)altitude_output - (int)roll_output + (int)pitch_output + (int)yaw_output);
+            throttle4 = (int)(target_throttle + (int)altitude_output + (int)roll_output + (int)pitch_output - (int)yaw_output);          
+
+        }
+        
+        //////////////////////////////
+        prev_lpf_dist = lpf_dist;
+        /////////////////////////////////
+
+
+        //throttle1 = (int)(80 + target_throttle + (int)roll_output - (int)pitch_output + (int)yaw_output);
+        //throttle2 = (int)(80 + target_throttle - (int)roll_output - (int)pitch_output - (int)yaw_output);
+        //throttle3 = (int)( target_throttle - (int)roll_output + (int)pitch_output + (int)yaw_output);
+        //throttle4 = (int)( target_throttle + (int)roll_output + (int)pitch_output - (int)yaw_output);
+
+        //throttle1 = target_throttle + (int)(+roll_output);
+        //throttle2 = target_throttle + (int)(-roll_output);
+        //throttle3 = target_throttle + (int)(-roll_output);
+        //throttle4 = target_throttle + (int)(+roll_output);
+
+        // throttle1 = 50 + target_throttle + (int)(-pitch_output);
+        // throttle2 = 50 + target_throttle + (int)(-pitch_output);
+        // throttle3 = target_throttle + (int)(+pitch_output);
+        // throttle4 = target_throttle + (int)(+pitch_output);        
+
+        //throttle1 = target_throttle + (int)(+yaw_output);
+        //throttle2 = target_throttle + (int)(-yaw_output);
+        //throttle3 = target_throttle + (int)(+yaw_output);
+        //throttle4 = target_throttle + (int)(-yaw_output);              
 
 
         if(throttle1 > 2000)    throttle1 = 2000;   //200넘으면 200으로
@@ -631,14 +1042,20 @@ int main()
         else if(throttle3 <= 1000)  throttle3 = 1000;
         if(throttle4 > 2000)    throttle4 = 2000;
         else if(throttle4 <= 1000)  throttle4 = 1000;    
-
+      
         motor1.pulsewidth_us(throttle1); //pitch 추가     1    2
         motor2.pulsewidth_us(throttle2); //pitch 추가     4    3   모터로 생각
         motor3.pulsewidth_us(throttle3); //pitch 추가     변수이름은 altitude이지만
         motor4.pulsewidth_us(throttle4); //pitch 추가     지금은 throttle
         
+       // motor2_1.pulsewidth_us(throttle_2_1);
+       // motor2_2.pulsewidth_us(throttle_2_2);
+
+
+       
         Work=rtos::Kernel::get_ms_count();
         ThisThread::sleep_until(rtos::Kernel::get_ms_count()+(3-(Work-Now)));
+        //ThisThread::sleep_for((3-(Work-Now)));
         main_time = (float)((rtos::Kernel::get_ms_count() - Now)/1000.0f);
         dt.reset();
     }
@@ -661,7 +1078,10 @@ void init_sensor(){
     mpu9250.getAres(); // Get accelerometer sensitivity
     mpu9250.getGres(); // Get gyro sensitivity
     mpu9250.getMres(); // Get magnetometer sensitivity
-   // ThisThread::sleep_for(100);
+    // ThisThread::sleep_for(100);
+    //pc.printf("magcal start\n");
+    //mpu9250.magcalMPU9250(magbias, magScale);
+    //pc.printf("%.3f %.3f %.3f // %.3f %.3f %.3f\n",magbias[0],magbias[1],magbias[2],magScale[0],magScale[1],magScale[2]);
     flow.init();
-    pc.printf("Init Done\n\r");
+  
 }
