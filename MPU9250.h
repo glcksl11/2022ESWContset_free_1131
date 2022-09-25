@@ -191,7 +191,7 @@ uint8_t Mmode = 0x06;        // Either 8 Hz 0x02) or 100 Hz (0x06) magnetometer 
 float aRes, gRes, mRes;      // scale resolutions per LSB for the sensors
 
 //Set up I2C, (SDA,SCL)
-I2C i2c(I2C_SDA, I2C_SCL);
+I2C i2c(I2C_SDA, I2C_SCL); //I2C_SDA, I2C_SCL
 
 //DigitalOut myled(LED1);
     
@@ -201,7 +201,7 @@ int intPin = 12;  // These can be changed, 2 and 3 are the Arduinos ext int pins
 int16_t accelCount[3];  // Stores the 16-bit signed accelerometer sensor output
 int16_t gyroCount[3];   // Stores the 16-bit signed gyro sensor output
 int16_t magCount[3];    // Stores the 16-bit signed magnetometer sensor output
-float magCalibration[3] = {0, 0, 0}, magbias[3] = {0, 0, 0};  // Factory mag calibration and mag bias
+float magCalibration[3] = {0, 0, 0}, magbias[3] = {151.926, 9.206, -311.011}, magScale[3]={0,0,0};  // Factory mag calibration and mag bias magbias[3] = {161.6494, 19.9466, -331.0574//151.926, -16.878, -331.278}
 float gyroBias[3] = {0, 0, 0}, accelBias[3] = {0, 0, 0}; // Bias corrections for gyro and accelerometer
 volatile float ax, ay, az, gx, gy, gz, mx, my, mz; // variables to hold latest sensor data values 
 int16_t tempCount;   // Stores the real internal chip temperature in degrees Celsius
@@ -224,6 +224,7 @@ float pitch, yaw, roll;
 float deltat = 0.003f;//0.005f                             // integration interval for both filter schemes
    // used to calculate integration interval                               // used to calculate integration interval
 float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};           // vector to hold quaternion
+float qq[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 float eInt[3] = {0.0f, 0.0f, 0.0f};              // vector to hold integral error for Mahony method
 
 class MPU9250 {
@@ -407,7 +408,7 @@ void initMPU9250()
  // Disable FSYNC and set accelerometer and gyro bandwidth to 44 and 42 Hz, respectively; 
  // DLPF_CFG = bits 2:0 = 010; this sets the sample rate at 1 kHz for both
  // Maximum delay is 4.9 ms which is just over a 200 Hz maximum rate
-  writeByte(MPU9250_ADDRESS, CONFIG, 0x03);  
+  writeByte(MPU9250_ADDRESS, CONFIG, 0x03);    //0x03
  
  // Set sample rate = gyroscope output rate/(1 + SMPLRT_DIV)
   writeByte(MPU9250_ADDRESS, SMPLRT_DIV, 0x04);  // Use a 200 Hz rate; the same rate set in CONFIG above
@@ -832,9 +833,9 @@ void MahonyQuaternionUpdate(float ax, float ay, float az, float gx, float gy, fl
             wz = 2.0f * bx * (q1q3 + q2q4) + 2.0f * bz * (0.5f - q2q2 - q3q3);  
 
             // Error is cross product between estimated direction and measured direction of gravity
-            ex = (ay * vz - az * vy) + (my * wz - mz * wy);
-            ey = (az * vx - ax * vz) + (mz * wx - mx * wz);
-            ez = (ax * vy - ay * vx) + (mx * wy - my * wx);
+            ex =  (ay * vz - az * vy);// + (my * wz - mz * wy);
+            ey =  (az * vx - ax * vz);// + (mz * wx - mx * wz);
+            ez =  (ax * vy - ay * vx);// + (mx * wy - my * wx);
             if (Ki > 0.0f)
             {
                 eInt[0] += ex;      // accumulate integral error
@@ -871,6 +872,108 @@ void MahonyQuaternionUpdate(float ax, float ay, float az, float gx, float gy, fl
             q[3] = q4 * norm;
  
         }
+
+    void MahonyQuaternionUpdate2(float ax, float ay, float az, float gx, float gy, float gz, float mx, float my, float mz)
+        {
+            float q1 = qq[0], q2 = qq[1], q3 = qq[2], q4 = qq[3];   // short name local variable for readability
+            float norm;
+            float hx, hy, bx, bz;
+            float vx, vy, vz, wx, wy, wz;
+            float ex, ey, ez;
+            
+            float pa, pb, pc,pd;
+
+            // Auxiliary variables to avoid repeated arithmetic
+            float q1q1 = q1 * q1;
+            float q1q2 = q1 * q2;
+            float q1q3 = q1 * q3;
+            float q1q4 = q1 * q4;
+            float q2q2 = q2 * q2;
+            float q2q3 = q2 * q3;
+            float q2q4 = q2 * q4;
+            float q3q3 = q3 * q3;
+            float q3q4 = q3 * q4;
+            float q4q4 = q4 * q4;   
+
+            // Normalise accelerometer measurement
+            norm = sqrt(ax * ax + ay * ay + az * az);
+            if (norm == 0.0f) return; // handle NaN
+            norm = 1.0f / norm;        // use reciprocal for division
+            ax *= norm;
+            ay *= norm;
+            az *= norm;
+
+            // Normalise magnetometer measurement
+            norm = sqrt(mx * mx + my * my + mz * mz);
+            if (norm == 0.0f) return; // handle NaN
+            norm = 1.0f / norm;        // use reciprocal for division
+            mx *= norm;
+            my *= norm;
+            mz *= norm;
+
+            // Reference direction of Earth's magnetic field
+            hx = 2.0f * mx * (0.5f - q3q3 - q4q4) + 2.0f * my * (q2q3 - q1q4) + 2.0f * mz * (q2q4 + q1q3);
+            hy = 2.0f * mx * (q2q3 + q1q4) + 2.0f * my * (0.5f - q2q2 - q4q4) + 2.0f * mz * (q3q4 - q1q2);
+            bx = sqrt((hx * hx) + (hy * hy));
+            bz = 2.0f * mx * (q2q4 - q1q3) + 2.0f * my * (q3q4 + q1q2) + 2.0f * mz * (0.5f - q2q2 - q3q3);
+
+            // Estimated direction of gravity and magnetic field
+            vx = 2.0f * (q2q4 - q1q3);
+            vy = 2.0f * (q1q2 + q3q4);
+            vz = q1q1 - q2q2 - q3q3 + q4q4;
+            wx = 2.0f * bx * (0.5f - q3q3 - q4q4) + 2.0f * bz * (q2q4 - q1q3);
+            wy = 2.0f * bx * (q2q3 - q1q4) + 2.0f * bz * (q1q2 + q3q4);
+            wz = 2.0f * bx * (q1q3 + q2q4) + 2.0f * bz * (0.5f - q2q2 - q3q3);  
+
+            // Error is cross product between estimated direction and measured direction of gravity
+            ex = (ay * vz - az * vy) +  (my * wz - mz * wy);
+            ey = (az * vx - ax * vz) +  (mz * wx - mx * wz);
+            ez = (ax * vy - ay * vx) +  (mx * wy - my * wx);
+
+            // ex = e1+ex*deltat;
+            // ey = e2+ey*deltat;
+            // ez = e3+ez*deltat;
+            // e1 = ex;
+            // e2 = ey;
+            // e3=  ez;
+            if (Ki > 0.0f)
+            {
+                eInt[0] += ex;      // accumulate integral error
+                eInt[1] += ey;
+                eInt[2] += ez;
+            }
+            else
+            {
+                eInt[0] = 0.0f;     // prevent integral wind up
+                eInt[1] = 0.0f;
+                eInt[2] = 0.0f;
+            }
+
+            // Apply feedback terms
+            gx = gx + 2.0f * ex + 0.0f * eInt[0];
+            gy = gy + 2.0f * ey + 0.0f * eInt[1];
+            gz = gz + 2.0f * ez + 0.0f * eInt[2];
+
+            // Integrate rate of change of quaternion
+            pa = q2;
+            pb = q3;
+            pc = q4;
+            pd = q1;
+            q1 = q1 + (-q2 * gx - q3 * gy - q4 * gz) * (0.5f * deltat);
+            q2 = pa + (pd * gx + pb * gz - pc * gy) * (0.5f * deltat);
+            q3 = pb + (pd * gy - pa * gz + pc * gx) * (0.5f * deltat);
+            q4 = pc + (pd * gz + pa * gy - pb * gx) * (0.5f * deltat);
+
+            // Normalise quaternion
+            norm = sqrt(q1 * q1 + q2 * q2 + q3 * q3 + q4 * q4);
+            norm = 1.0f / norm;
+            qq[0] = q1 * norm;
+            qq[1] = q2 * norm;
+            qq[2] = q3 * norm;
+            qq[3] = q4 * norm;
+ 
+        }
+        
 void read_data(){
       if(readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01) {  // On interrupt, check if data ready interrupt
 
@@ -899,13 +1002,64 @@ void get_data(){
         //pc.printf("range: %d cm, velocity: %d cm/s, rate: %.2f Hz\n", sensor1.getRange_cm(), sensor1.getVelocity_cms(), 1/dt.read());
         read_data();
         MahonyQuaternionUpdate(ax, ay, az, gx*PI/180.0f, gy*PI/180.0f, gz*PI/180.0f, my, mx, mz);
-        yaw   = atan2(2.0f * (q[1] * q[2] + q[0] * q[3]), q[0] * q[0] + q[1] * q[1] - q[2] * q[2] - q[3] * q[3]);
+        MahonyQuaternionUpdate2(ax, ay, az, gx*PI/180.0f, gy*PI/180.0f, gz*PI/180.0f, my, mx, mz);
+
+        yaw   = atan2(2.0f * (qq[1] * qq[2] + qq[0] * qq[3]), qq[0] * qq[0] + qq[1] * qq[1] - qq[2] * qq[2] - qq[3] * qq[3]);
+        //yaw   = atan2(2.0f * (q[1] * q[2] + q[0] * q[3]), q[0] * q[0] + q[1] * q[1] - q[2] * q[2] - q[3] * q[3]);
         pitch = -asin(2.0f * (q[1] * q[3] - q[0] * q[2]));
         roll  = atan2(2.0f * (q[0] * q[1] + q[2] * q[3]), q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3]);
         pitch *= 180.0f / PI;
+        //yaw += gz * deltat;
         yaw   *= 180.0f / PI; 
         //yaw   -= 13.8f; // Declination at Danville, California is 13 degrees 48 minutes and 47 seconds on 2014-04-04
         roll  *= 180.0f / PI;
         }
+
+     void magcalMPU9250(float * dest1, float * dest2) 
+{
+  uint16_t ii = 0, sample_count = 0;
+  int32_t mag_bias[3] = {0, 0, 0}, mag_scale[3] = {0, 0, 0};
+  int16_t mag_max[3] = {-32767, -32767, -32767}, mag_min[3] = {32767, 32767, 32767}, mag_temp[3] = {0, 0, 0};
+  
+    // shoot for ~fifteen seconds of mag data
+    if(Mmode == 0x02) sample_count = 128;  // at 8 Hz ODR, new mag data is available every 125 ms
+    if(Mmode == 0x06) sample_count = 1500;  // at 100 Hz ODR, new mag data is available every 10 ms
+    
+   for(ii = 0; ii < sample_count; ii++) {
+    readMagData(mag_temp);  // Read the mag data  
+    
+    for (int jj = 0; jj < 3; jj++) {
+      if(mag_temp[jj] > mag_max[jj]) mag_max[jj] = mag_temp[jj];
+      if(mag_temp[jj] < mag_min[jj]) mag_min[jj] = mag_temp[jj];
+    }
+    
+    if(Mmode == 0x02) wait_ms(135);  // at 8 Hz ODR, new mag data is available every 125 ms
+    if(Mmode == 0x06) wait_ms(12);  // at 100 Hz ODR, new mag data is available every 10 ms
+    }
+ 
+   // Get hard iron correction
+    mag_bias[0]  = (mag_max[0] + mag_min[0])/2;  // get average x mag bias in counts
+    mag_bias[1]  = (mag_max[1] + mag_min[1])/2;  // get average y mag bias in counts
+    mag_bias[2]  = (mag_max[2] + mag_min[2])/2;  // get average z mag bias in counts
+    
+    dest1[0] = (float) mag_bias[0]*mRes*magCalibration[0];  // save mag biases in G for main program
+    dest1[1] = (float) mag_bias[1]*mRes*magCalibration[1];   
+    dest1[2] = (float) mag_bias[2]*mRes*magCalibration[2];  
+       
+    // Get soft iron correction estimate
+    mag_scale[0]  = (mag_max[0] - mag_min[0])/2;  // get average x axis max chord length in counts
+    mag_scale[1]  = (mag_max[1] - mag_min[1])/2;  // get average y axis max chord length in counts
+    mag_scale[2]  = (mag_max[2] - mag_min[2])/2;  // get average z axis max chord length in counts
+ 
+    float avg_rad = mag_scale[0] + mag_scale[1] + mag_scale[2];
+    avg_rad /= 3.0;
+ 
+    dest2[0] = avg_rad/((float)mag_scale[0]);
+    dest2[1] = avg_rad/((float)mag_scale[1]);
+    dest2[2] = avg_rad/((float)mag_scale[2]);
+}
+
+
   };
+ 
 #endif
